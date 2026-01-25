@@ -56,11 +56,15 @@ SensorValue ambiTemp(0.8);   // v2
 SensorValue ambiHumid(0.8);  // v3
 
 // Pump speed and states received from cloud
-bool pumpIsOn = false;  // v4
-float pumpSpeed = 0.0;  // v5
+bool pumpIsOn = false;       // v4
+int pumpSpeed = 10;          // v5
 
 // Spikes on cloud chart eery time device boots - count of resets
-bool mcuReset = true;  // v6
+bool mcuReset = true;        // v6
+
+// Auto pump start threshold
+int soilMoistThrMin = 50;    // v7
+int soilMoistThrMax = 60;    // v8
 
 // Timers to trigger certain tasks at intervals
 BlynkTimer timer100ms;
@@ -155,11 +159,9 @@ void DHT22_BlynkWrite() {
 void Pump_Init() {
   pinMode(PIN_PUMP_ISON, OUTPUT);
   ledcAttachChannel(PIN_PUMP_ENB, PWM_FREQ, PWM_RES, LEDC_CHANNEL_0);
-  // Write OFF state to Blynk on startup
-  Pump_BlynkWrite();
 }
 
-void Pump_SetState(bool state, float speed) {
+void Pump_SetState(bool state, int speed) {
   // State
   const bool oldState = pumpIsOn;
   pumpIsOn = state;
@@ -170,7 +172,7 @@ void Pump_SetState(bool state, float speed) {
   }
 
   // Speed
-  const float oldSpeed = pumpSpeed;
+  const int oldSpeed = pumpSpeed;
   pumpSpeed = speed;
 
   // Only if there has been a state or speed change
@@ -208,6 +210,25 @@ void Pump_BlynkWrite() {
   Blynk.virtualWrite(V5, pumpSpeed);
 }
 
+// ========= MOISTURE THR ===========
+
+BLYNK_WRITE(V7) {
+  int val = constrain(param.asInt(), 0, 100);
+  soilMoistThrMin = val;
+  Serial.printf("BLYNK_WRITE(V7): %d\n", val);
+}
+
+BLYNK_WRITE(V8) {
+  int val = constrain(param.asInt(), 0, 100);
+  soilMoistThrMax = val;
+  Serial.printf("BLYNK_WRITE(V7): %d\n", val);
+}
+
+void MoistThr_BlynkWrite() {
+  Blynk.virtualWrite(V7, soilMoistThrMin);
+  Blynk.virtualWrite(V8, soilMoistThrMax);
+}
+
 // ========= DEVICE STATE ===========
 
 void DeviceReset_SetAndUpload() {
@@ -219,10 +240,24 @@ void DeviceReset_SetAndUpload() {
   }
 }
 
+// ======= AUTO DESCISION LOGIC =========
+
+void AutoDecisionLogic() {
+  if (soilMoist.Ema < soilMoistThrMin) {
+    Pump_SetState(true, pumpSpeed);
+    Blynk.virtualWrite(V4, pumpIsOn);
+  }
+  if (soilMoist.Ema > soilMoistThrMax) {
+    Pump_SetState(false, pumpSpeed);
+    Blynk.virtualWrite(V4, pumpIsOn);
+  }
+}
+
 // ============ TIMED FN ============
 
 void Timed_100ms() {
   DeviceReset_SetAndUpload();
+  AutoDecisionLogic();
 }
 
 void Timed_5s() {
@@ -282,6 +317,12 @@ void setup() {
   // First state upload - creates the spike on boot or reset
   DeviceReset_SetAndUpload();
   Serial.println("DeviceReset_SetAndUpload: done");
+
+  MoistThr_BlynkWrite();
+  Serial.println("MoistThr_BlynkWrite: done");
+
+  Pump_BlynkWrite();
+  Serial.println("Pump_BlynkWrite: done");
 
   // Schedule all tasks
   timer100ms.setInterval(100, Timed_100ms);
