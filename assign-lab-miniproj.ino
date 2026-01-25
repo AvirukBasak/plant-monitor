@@ -15,10 +15,10 @@
 #define PWM_RES (8)
 #define PWM_MAXVAL ((1 << PWM_RES) - 1)
 
-#define PUMP_MINSPEED (0.10)
-#define PUMP_MAXSPEED (1.0)
+#define PUMP_MAPPEDMIN (0.15)
+#define PUMP_MAPPEDMAX (0.8)
 #define PUMP_STARTSPEED (0.4)
-#define PUMP_STARTDELAY (50)
+#define PUMP_STARTDELAY (100)
 
 // ================ UTILS ===================
 
@@ -159,31 +159,47 @@ void Pump_Init() {
   Pump_BlynkWrite();
 }
 
-void Pump_SetIsOn(bool state) {
+void Pump_SetState(bool state, float speed) {
+  // State
   const bool oldState = pumpIsOn;
   pumpIsOn = state;
-  digitalWrite(PIN_PUMP_ISON, pumpIsOn ? HIGH : LOW);
 
-  /* This gives pump an initial "push" if it can't start with too low duty cycle.
-   * Of course, it has the unintended effect of speed "jumps" when changing speed.
-   * We could add a better logic but for this application we don't care.
-   * After all, this feature of "pushing" the jump is over engineering. */
-  ledcWrite(PIN_PUMP_ENB, pumpIsOn ? (PUMP_STARTSPEED * PWM_MAXVAL) : 0);
-  delay(PUMP_STARTDELAY);
+  // Only if there has been a state change
+  if (state != oldState) {
+    digitalWrite(PIN_PUMP_ISON, state ? HIGH : LOW);
+  }
 
-  ledcWrite(PIN_PUMP_ENB, pumpIsOn ? (pumpSpeed * PWM_MAXVAL) : 0);
+  // Speed
+  const float oldSpeed = pumpSpeed;
+  pumpSpeed = speed;
+
+  // Only if there has been a state or speed change
+  if (state != oldState || speed != oldSpeed) {
+    // Speed % adjusted b/w 0 and 1; hard 0 or map in the MIN-MAX range
+    const float mappedSpeed = (speed < 1) ? 0 : MapF(speed, 1, 100, PUMP_MAPPEDMIN, PUMP_MAPPEDMAX);
+    // Either motor turned on with non-zero speed or overall speed increased
+    if ((!oldState && state && speed > 0) || speed > oldSpeed) {
+      // Target speed is below the "start" speed
+      if (mappedSpeed < PUMP_STARTSPEED) {
+        // Speed "jump" to give motor an inital "push"
+        ledcWrite(PIN_PUMP_ENB, state ? (PUMP_STARTSPEED * PWM_MAXVAL) : 0);
+        delay(PUMP_STARTDELAY);
+      }
+    }
+    // Stabilize to target speed after delay
+    ledcWrite(PIN_PUMP_ENB, state ? (mappedSpeed * PWM_MAXVAL) : 0);
+  }
 }
 
 BLYNK_WRITE(V4) {
   int val = !!param.asInt();
-  Pump_SetIsOn(val);
+  Pump_SetState(val, pumpSpeed);
   Serial.printf("BLYNK_WRITE(V4): %s\n", val ? "ON" : "OFF");
 }
 
 BLYNK_WRITE(V5) {
   int val = constrain(param.asInt(), 0, 100);
-  pumpSpeed = MapF(val, 0, 100, PUMP_MINSPEED, PUMP_MAXSPEED);
-  Pump_SetIsOn(pumpIsOn);
+  Pump_SetState(pumpIsOn, val);
   Serial.printf("BLYNK_WRITE(V5): %d\n", val);
 }
 
