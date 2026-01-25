@@ -1,6 +1,7 @@
 #include "secrets.hpp"
 
 #include <cmath>
+
 #include "DHT.h"
 #include "BlynkSimpleEsp32.h"
 
@@ -11,68 +12,57 @@
 #define PIN_PUMP_ISON (18)
 
 #define WINDOW_SIZE (100)
-#define WINDOW_EMAALPHA (0.2f)
+
+// ================ UTILS ===================
+
+class SensorValue {
+
+  float alpha;
+
+public:
+
+  float Ema;
+  float LastVal;
+
+  SensorValue(float alpha = 0.5)
+    : alpha{ alpha }, Ema{ 0 }, LastVal{ 0 } {
+  }
+
+  void AddVal(float val) {
+    this->Ema = (alpha * val) + ((1.0 - alpha) * Ema);
+    this->LastVal = val;
+  }
+};
+
+float MapF(float val, float inMin, float inMax, float outMin, float outMax) {
+  return (val - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+}
+
+// ================== MAIN CODE ==================
 
 DHT dht(PIN_DHT22_DATA, DHT22);
 
-// Windows used to run EMA over last 100 samples
-float windowSoilMoist[WINDOW_SIZE];        // v0
-float windowLight[WINDOW_SIZE];            // v1
-float windowAmbiTempCelsius[WINDOW_SIZE];  // v2
-float windowAmbiMoistPercent[WINDOW_SIZE]; // v3
+// EMA value (with last sensor reading)
+SensorValue soilMoist(0.8);  // v0
+SensorValue light(0.8);      // v1
+SensorValue ambiTemp(0.8);   // v2
+SensorValue ambiHumid(0.8);  // v3
 
 // Pump speed and states received from cloud
-bool pumpIsOn = false;               // v4
-float pumpSpeed = 0.0;               // v5
+bool pumpIsOn = false;  // v4
+float pumpSpeed = 0.0;  // v5
 
 // Spikes on cloud chart eery time device boots - count of resets
-bool mcuState = true;                // v6
-
-// EMA value (or last sensor reading) - depends
-float lastSoilMoist = 0;
-float lastLight = 0;
-float lastAmbiTempCelsius = 0;
-float lastAmbiMoistPercent = 0;
+bool mcuReset = true;  // v6
 
 // Timers to trigger certain tasks at intervals
 BlynkTimer timer100ms;
-BlynkTimer timer1s;
-BlynkTimer timer2s;
 BlynkTimer timer5s;
-
-// ================ UITILS ===============
-
-float map_float(float x, float in_min, float in_max, float out_min, float out_max) {
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
-
-// =========== WINDOW MANAGERS ============
-
-void WindowVals_Init(float* window, float val = 0) {
-  for (int i = 0; i < WINDOW_SIZE - 1; ++i) {
-    window[i] = val;
-  }
-}
-
-void WindowVals_Push(float* window, float newValue) {
-  for (int i = 0; i < WINDOW_SIZE - 1; i++) {
-    window[i] = window[i + 1];
-  }
-  window[WINDOW_SIZE - 1] = newValue;
-}
-
-float WindowVals_GetEMA(float* window, float newValue, float alpha = WINDOW_EMAALPHA) {
-  float currentEMA = window[WINDOW_SIZE - 1];
-  float newEMA = (alpha * newValue) + ((1.0 - alpha) * currentEMA);
-  WindowVals_Push(window, newEMA);
-  return newEMA;
-}
 
 // ============ SOIL MOISTURE ============
 
 void SoilMoist_Init() {
   pinMode(PIN_SOILMOIST_A, INPUT);
-  WindowVals_Init(windowSoilMoist);
 }
 
 void SoilMoist_ReadAnalog() {
@@ -84,18 +74,17 @@ void SoilMoist_ReadAnalog() {
   }
   // max value of 4095 indicates 12 bit ADC readings
   // higher analog value means more dry - so 4095 maps to 0%
-  lastSoilMoist = map_float(val, 0, 4095, 100, 0);
+  soilMoist.AddVal(MapF(val, 0, 4095, 100, 0));
 }
 
 void SoilMoist_BlynkWrite() {
-  Blynk.virtualWrite(V0, lastSoilMoist);
+  Blynk.virtualWrite(V0, soilMoist.Ema);
 }
 
 // ============ LIGHT SENSOR ============
 
 void Light_Init() {
   pinMode(PIN_LIGHT_SIG, INPUT);
-  WindowVals_Init(windowLight);
 }
 
 void Light_ReadAnalog() {
@@ -106,24 +95,22 @@ void Light_ReadAnalog() {
     return;
   }
   // Convert 12-bit ADC value (0-4095) to voltage (0-3.3V)
-  float voltage = map_float(val, 0, 4095, 0, 3.3);
+  float voltage = MapF(val, 0, 4095, 0, 3.3);
   // Convert voltage to current, assume the default 10kohm resistor, use Ohm's law
   float current = voltage / 10e3;
   // 2 microamps per lux
   float lux = current * 2e6;
-  lastLight = lux;
+  light.AddVal(lux);
 }
 
 void Light_BlynkWrite() {
-  Blynk.virtualWrite(V1, lastLight);
+  Blynk.virtualWrite(V1, light.Ema);
 }
 
 // ============ DHT22 (TEMPERATURE & HUMIDITY) ============
 
 void DHT22_Init() {
   dht.begin();
-  WindowVals_Init(windowAmbiTempCelsius);
-  WindowVals_Init(windowAmbiMoistPercent);
 }
 
 void DHT22_ReadTemperature() {
@@ -133,7 +120,7 @@ void DHT22_ReadTemperature() {
     // Serial.println("DHT22_ReadTemperature: error: temperature is NaN");
     return;
   }
-  lastAmbiTempCelsius = val;
+  ambiTemp.AddVal(val);
 }
 
 void DHT22_ReadHumidity() {
@@ -143,7 +130,7 @@ void DHT22_ReadHumidity() {
     // Serial.println("DHT22_ReadHumidity: error: humidity is NaN");
     return;
   }
-  lastAmbiMoistPercent = val;
+  ambiHumid.AddVal(val);
 }
 
 void DHT22_Read() {
@@ -152,8 +139,8 @@ void DHT22_Read() {
 }
 
 void DHT22_BlynkWrite() {
-  Blynk.virtualWrite(V2, lastAmbiTempCelsius);
-  Blynk.virtualWrite(V3, lastAmbiMoistPercent);
+  Blynk.virtualWrite(V2, ambiTemp.Ema);
+  Blynk.virtualWrite(V3, ambiHumid.Ema);
 }
 
 // ============ MOTOR ============
@@ -180,7 +167,7 @@ BLYNK_WRITE(V4) {
 
 BLYNK_WRITE(V5) {
   int val = constrain(param.asInt(), 0, 100);
-  pumpSpeed = (float)val / 100;
+  pumpSpeed = MapF(val, 0, 100, 0, 1);
   Pump_SetIsOn(pumpIsOn);
   Serial.printf("BLYNK_WRITE(V5): %d\n", val);
 }
@@ -192,51 +179,36 @@ void Pump_BlynkWrite() {
 
 // ========= DEVICE STATE ===========
 
-void DeviceState_UploadAndSet() {
+void DeviceReset_SetAndUpload() {
   // Write current state or HIGH (after reset)
-  Blynk.virtualWrite(V6, mcuState);
+  Blynk.virtualWrite(V6, mcuReset);
   // Set to LOW to indicate normal operation
-  if (mcuState == true) {
-    mcuState = false;
+  if (mcuReset == true) {
+    mcuReset = false;
   }
 }
 
 // ============ TIMED FN ============
 
 void Timed_100ms() {
-  // State
-  DeviceState_UploadAndSet();
-
-  // Soil
-  SoilMoist_ReadAnalog();
-  lastSoilMoist = WindowVals_GetEMA(windowSoilMoist, lastSoilMoist);
-  SoilMoist_BlynkWrite();
-
-  // Light
-  Light_ReadAnalog();
-  lastLight = WindowVals_GetEMA(windowLight, lastLight);
-  Light_BlynkWrite();
-}
-
-void Timed_1s() {
-}
-
-void Timed_2s() {
+  DeviceReset_SetAndUpload();
 }
 
 void Timed_5s() {
-  // DHT
+  SoilMoist_ReadAnalog();
+  SoilMoist_BlynkWrite();
+
+  Light_ReadAnalog();
+  Light_BlynkWrite();
+
   DHT22_Read();
-  lastAmbiTempCelsius = WindowVals_GetEMA(windowAmbiTempCelsius, lastAmbiTempCelsius);
-  lastAmbiMoistPercent = WindowVals_GetEMA(windowAmbiMoistPercent, lastAmbiMoistPercent);
   DHT22_BlynkWrite();
 
-  // Print
   Serial.printf("\n");
-  Serial.printf("Soil Moisture:     %f\n", lastSoilMoist);
-  Serial.printf("Light:             %f\n", lastLight);
-  Serial.printf("DHT22 Temperature: %f\n", lastAmbiTempCelsius);
-  Serial.printf("DHT22 Humidity:    %f\n", lastAmbiMoistPercent);
+  Serial.printf("Soil Moisture:     (%.2f, %.2f)\n", soilMoist.LastVal, soilMoist.Ema);
+  Serial.printf("Light:             (%.2f, %.2f)\n", light.LastVal, light.Ema);
+  Serial.printf("DHT22 Temperature: (%.2f, %.2f)\n", ambiTemp.LastVal, ambiTemp.Ema);
+  Serial.printf("DHT22 Humidity:    (%.2f, %.2f)\n", ambiHumid.LastVal, ambiHumid.Ema);
 }
 
 void setup() {
@@ -266,21 +238,22 @@ void setup() {
   // Sensors
   SoilMoist_Init();
   Serial.println("SoilMoist_Init: done");
+
   Light_Init();
   Serial.println("Light_Init: done");
+
   DHT22_Init();
   Serial.println("DHT22_Init: done");
+
   Pump_Init();
   Serial.println("Pump_Init: done");
 
   // First state upload - creates the spike on boot or reset
-  DeviceState_UploadAndSet();
-  Serial.println("DeviceState_UploadAndSet: done");
+  DeviceReset_SetAndUpload();
+  Serial.println("DeviceReset_SetAndUpload: done");
 
   // Schedule all tasks
   timer100ms.setInterval(100, Timed_100ms);
-  timer1s.setInterval(1000, Timed_1s);
-  timer2s.setInterval(2000, Timed_2s);
   timer5s.setInterval(5000, Timed_5s);
   Serial.println("timer.setInterval: done");
 }
@@ -288,8 +261,6 @@ void setup() {
 void loop() {
   Blynk.run();
   timer100ms.run();
-  timer1s.run();
-  timer2s.run();
   timer5s.run();
   // yield to avoid any WDT resets
   yield();
