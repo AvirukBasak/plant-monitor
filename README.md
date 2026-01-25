@@ -8,4 +8,3 @@
 - Reset spike indicates the moment the device turned ON.
 - Reset telemetry is uploaded every 100 ms.
 - The last screenshot of the new version allows adjusting threshold to autostart pump.
-- 
