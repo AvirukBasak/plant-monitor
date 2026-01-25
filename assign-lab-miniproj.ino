@@ -5,13 +5,20 @@
 #include "DHT.h"
 #include "BlynkSimpleEsp32.h"
 
-#define PIN_SOILMOIST_A (34)
-#define PIN_LIGHT_SIG (35)
-#define PIN_DHT22_DATA (25)
-#define PIN_PUMP_ENB (19)
-#define PIN_PUMP_ISON (18)
+#define PIN_SOILMOIST_A (34)  // ADC1, i/p only - not an issue
+#define PIN_LIGHT_SIG (35)    // ADC1, i/p only - not an issue
+#define PIN_DHT22_DATA (32)   // ADC not needed, both i/o needed
+#define PIN_PUMP_ISON (26)    // Needs o/p capable pin
+#define PIN_PUMP_ENB (27)     // PWM pin, o/p capable needed
 
-#define WINDOW_SIZE (100)
+#define PWM_FREQ (100)
+#define PWM_RES (8)
+#define PWM_MAXVAL ((1 << PWM_RES) - 1)
+
+#define PUMP_MINSPEED (0.10)
+#define PUMP_MAXSPEED (1.0)
+#define PUMP_STARTSPEED (0.4)
+#define PUMP_STARTDELAY (50)
 
 // ================ UTILS ===================
 
@@ -147,16 +154,24 @@ void DHT22_BlynkWrite() {
 
 void Pump_Init() {
   pinMode(PIN_PUMP_ISON, OUTPUT);
-  pinMode(PIN_PUMP_ENB, OUTPUT);
+  ledcAttachChannel(PIN_PUMP_ENB, PWM_FREQ, PWM_RES, LEDC_CHANNEL_0);
   // Write OFF state to Blynk on startup
   Pump_BlynkWrite();
 }
 
 void Pump_SetIsOn(bool state) {
+  const bool oldState = pumpIsOn;
   pumpIsOn = state;
   digitalWrite(PIN_PUMP_ISON, pumpIsOn ? HIGH : LOW);
-  // Uses PWM with max res of 8 bits (so max val of 255)
-  analogWrite(PIN_PUMP_ENB, pumpIsOn ? (pumpSpeed * 255) : 0);
+
+  /* This gives pump an initial "push" if it can't start with too low duty cycle.
+   * Of course, it has the unintended effect of speed "jumps" when changing speed.
+   * We could add a better logic but for this application we don't care.
+   * After all, this feature of "pushing" the jump is over engineering. */
+  ledcWrite(PIN_PUMP_ENB, pumpIsOn ? (PUMP_STARTSPEED * PWM_MAXVAL) : 0);
+  delay(PUMP_STARTDELAY);
+
+  ledcWrite(PIN_PUMP_ENB, pumpIsOn ? (pumpSpeed * PWM_MAXVAL) : 0);
 }
 
 BLYNK_WRITE(V4) {
@@ -167,7 +182,7 @@ BLYNK_WRITE(V4) {
 
 BLYNK_WRITE(V5) {
   int val = constrain(param.asInt(), 0, 100);
-  pumpSpeed = MapF(val, 0, 100, 0, 1);
+  pumpSpeed = MapF(val, 0, 100, PUMP_MINSPEED, PUMP_MAXSPEED);
   Pump_SetIsOn(pumpIsOn);
   Serial.printf("BLYNK_WRITE(V5): %d\n", val);
 }
