@@ -56,18 +56,17 @@ SensorValue ambiTemp(0.8);   // v2
 SensorValue ambiHumid(0.8);  // v3
 
 // Pump speed and states received from cloud
-bool pumpIsOn = false;       // v4
-int pumpSpeed = 10;          // v5
+bool pumpIsOn = false;  // v4
+int pumpSpeed = 10;     // v5
 
 // Spikes on cloud chart eery time device boots - count of resets
-bool mcuReset = true;        // v6
+bool mcuReset = true;  // v6
 
 // Auto pump start threshold
-int soilMoistThrMin = 50;    // v7
-int soilMoistThrMax = 60;    // v8
+int soilMoistThrMin = 50;  // v7
+int soilMoistThrMax = 60;  // v8
 
 // Timers to trigger certain tasks at intervals
-BlynkTimer timer100ms;
 BlynkTimer timer5s;
 
 // ============ SOIL MOISTURE ============
@@ -214,14 +213,26 @@ void Pump_BlynkWrite() {
 
 BLYNK_WRITE(V7) {
   int val = constrain(param.asInt(), 0, 100);
-  soilMoistThrMin = val;
-  Serial.printf("BLYNK_WRITE(V7): %d\n", val);
+  if (val < soilMoistThrMax) {
+    soilMoistThrMin = val;
+    Serial.printf("BLYNK_WRITE(V7): %d\n", val);
+  } else {
+    // Invalid value - override cloud with old value
+    Serial.printf("BLYNK_WRITE(V7): %d: invalid value\n", val);
+    Blynk.virtualWrite(V7, soilMoistThrMin);
+  }
 }
 
 BLYNK_WRITE(V8) {
   int val = constrain(param.asInt(), 0, 100);
-  soilMoistThrMax = val;
-  Serial.printf("BLYNK_WRITE(V7): %d\n", val);
+  if (soilMoistThrMin < val) {
+    soilMoistThrMax = val;
+    Serial.printf("BLYNK_WRITE(V7): %d\n", val);
+  } else {
+    // Invalid value - override cloud with old value
+    Serial.printf("BLYNK_WRITE(V8): %d: invalid value\n", val);
+    Blynk.virtualWrite(V8, soilMoistThrMax);
+  }
 }
 
 void MoistThr_BlynkWrite() {
@@ -240,27 +251,30 @@ void DeviceReset_SetAndUpload() {
   }
 }
 
+BLYNK_WRITE(V6) {
+  bool val = !!param.asInt();
+  if (val) {
+    esp_restart();
+  }
+}
+
 // ======= AUTO DESCISION LOGIC =========
 
-void AutoDecisionLogic() {
+void SoilMoist_Controller() {
   if (soilMoist.Ema < soilMoistThrMin) {
     Pump_SetState(true, pumpSpeed);
     Blynk.virtualWrite(V4, pumpIsOn);
-  }
-  if (soilMoist.Ema > soilMoistThrMax) {
+  } else if (soilMoist.Ema > soilMoistThrMax) {
     Pump_SetState(false, pumpSpeed);
     Blynk.virtualWrite(V4, pumpIsOn);
   }
 }
 
-// ============ TIMED FN ============
-
-void Timed_100ms() {
-  DeviceReset_SetAndUpload();
-  AutoDecisionLogic();
-}
+// ============ TIMED LOGIC ============
 
 void Timed_5s() {
+  DeviceReset_SetAndUpload();
+
   SoilMoist_ReadAnalog();
   SoilMoist_BlynkWrite();
 
@@ -275,7 +289,11 @@ void Timed_5s() {
   Serial.printf("Light:             (%.2f, %.2f)\n", light.LastVal, light.Ema);
   Serial.printf("DHT22 Temperature: (%.2f, %.2f)\n", ambiTemp.LastVal, ambiTemp.Ema);
   Serial.printf("DHT22 Humidity:    (%.2f, %.2f)\n", ambiHumid.LastVal, ambiHumid.Ema);
+
+  SoilMoist_Controller();
 }
+
+// ============ SETUP ============
 
 void setup() {
   // Serial
@@ -325,14 +343,14 @@ void setup() {
   Serial.println("Pump_BlynkWrite: done");
 
   // Schedule all tasks
-  timer100ms.setInterval(100, Timed_100ms);
   timer5s.setInterval(5000, Timed_5s);
   Serial.println("timer.setInterval: done");
 }
 
+// ============ LOOP ============
+
 void loop() {
   Blynk.run();
-  timer100ms.run();
   timer5s.run();
   // yield to avoid any WDT resets
   yield();
