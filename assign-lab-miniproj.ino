@@ -67,7 +67,7 @@ int soilMoistThrMin = 50;  // v7
 int soilMoistThrMax = 60;  // v8
 
 // Timers to trigger certain tasks at intervals
-BlynkTimer timer5s;
+BlynkTimer timer30s;
 
 // ============ SOIL MOISTURE ============
 
@@ -272,7 +272,7 @@ void SoilMoist_Controller() {
 
 // ============ TIMED LOGIC ============
 
-void Timed_5s() {
+void Timed_30s() {
   DeviceReset_SetAndUpload();
 
   SoilMoist_ReadAnalog();
@@ -343,7 +343,7 @@ void setup() {
   Serial.println("Pump_BlynkWrite: done");
 
   // Schedule all tasks
-  timer5s.setInterval(5000, Timed_5s);
+  timer30s.setInterval(30'000, Timed_30s);
   Serial.println("timer.setInterval: done");
 }
 
@@ -351,7 +351,7 @@ void setup() {
 
 void loop() {
   Blynk.run();
-  timer5s.run();
+  timer30s.run();
   // yield to avoid any WDT resets
   yield();
 }
