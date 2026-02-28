@@ -50,6 +50,9 @@ State State_previous = (State)-1;
 unsigned long WiFi_connectStartTime = 0;
 
 void State_EnterInitConfig() {
+  void ResetPeripherals();
+  ResetPeripherals();
+
   Serial.println("[AP] Starting access point...");
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_AP);
@@ -62,7 +65,8 @@ void State_EnterInitConfig() {
   WiFi.softAPConfig(localIP, gateway, subnet);
   WiFi.softAP(WiFi_INIT_AP_SSID, "");
   MDNS.begin(WIFI_INIT_APNAME);
-  Serial.printf("[AP] WiFi IP: %s\n", WiFi.softAPIP().toString().c_str());
+  Serial.print("[AP] WiFi IP: ");
+  Serial.println(WiFi.softAPIP());
 
   void ICS_GetRoot();
   void ICS_PostConfig();
@@ -79,7 +83,6 @@ void State_LoopInitConfig() {
 
 void State_EnterConnecting() {
   Serial.println("[STA] Tearing down AP...");
-  InitConfigServer.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WiFi_SSID, WiFi_Passwd);
@@ -93,6 +96,7 @@ void State_LoopConnecting() {
     Serial.print("[STA] Connected! IP: ");
     Serial.println(WiFi.localIP());
     State_current = STATE_CONNECTED;
+    MDNS.begin(WIFI_INIT_APNAME);
     return;
   }
   if (millis() - WiFi_connectStartTime > WIFI_CONNECT_TIMEOUT) {
@@ -106,14 +110,18 @@ void State_LoopConnecting() {
 const char* ICS_RootPage = R"rawliteral(
   <!DOCTYPE html>
   <html>
+    <head>
+      <title>Plant Monitor Setup</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    </head>
     <body>
-    <h2>ESP32 Setup</h2>
+    <h2>Plant Monitor Setup</h2>
     <form action="/connect" method="POST">
       <label>SSID:</label>
-      <input name="ssid"><br><br>
+      <input required name="ssid"><br><br>
 
       <label>Password:</label>
-      <input name="pass" type="password">
+      <input required name="pass" type="password">
 
       <input type="submit" value="Set Config">
     </form>
@@ -190,15 +198,15 @@ SensorValue ambiTemp(0.8);   // v2
 SensorValue ambiHumid(0.8);  // v3
 
 // Pump speed and states received from cloud
-bool pumpIsOn = false;  // v4
-int pumpSpeed = 10;     // v5
+bool pumpIsOn = false;       // v4
+int pumpSpeed = 10;          // v5
 
 // Spikes on cloud chart eery time device boots - count of resets
-bool mcuReset = true;  // v6
+bool mcuReset = true;        // v6
 
 // Auto pump start threshold
-int soilMoistThrMin = 50;  // v7
-int soilMoistThrMax = 60;  // v8
+int soilMoistThrMin = 50;    // v7
+int soilMoistThrMax = 60;    // v8
 
 // Timers to trigger certain tasks at intervals
 BlynkTimer timer30s;
@@ -429,6 +437,24 @@ void Timed_30s() {
 
 // ============ CONNECTED STATE ============
 
+void InitPeripherals() {
+  SoilMoist_Init();
+  Serial.println("SoilMoist_Init: done");
+
+  Light_Init();
+  Serial.println("Light_Init: done");
+
+  DHT22_Init();
+  Serial.println("DHT22_Init: done");
+
+  Pump_Init();
+  Serial.println("Pump_Init: done");
+}
+
+void ResetPeripherals() {
+  Pump_SetState(false, pumpSpeed);
+}
+
 void State_EnterConnected() {
   // Blynk
   Blynk.config(BLYNK_AUTH_TOKEN);
@@ -461,6 +487,7 @@ void State_LoopConnected() {
     State_current = STATE_INITCONFIG;
     return;
   }
+  InitConfigServer.handleClient();
   Blynk.run();
   timer30s.run();
   yield();
@@ -471,20 +498,8 @@ void State_LoopConnected() {
 void setup() {
   Serial.begin(115200);
   Serial.println("Serial.begin: done");
+  InitPeripherals();
   State_current = STATE_INITCONFIG;
-
-  // Sensors
-  SoilMoist_Init();
-  Serial.println("SoilMoist_Init: done");
-
-  Light_Init();
-  Serial.println("Light_Init: done");
-
-  DHT22_Init();
-  Serial.println("DHT22_Init: done");
-
-  Pump_Init();
-  Serial.println("Pump_Init: done");
 }
 
 // ============ LOOP ============
