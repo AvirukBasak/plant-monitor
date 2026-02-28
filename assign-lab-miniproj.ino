@@ -1,9 +1,16 @@
 #include "secrets.hpp"
 
 #include <cmath>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 
 #include "DHT.h"
 #include "BlynkSimpleEsp32.h"
+
+#define WIFI_CRED_MAXLEN (256)
+#define WIFI_CONNECT_TIMEOUT (15'000)
+#define WIFI_INIT_APNAME "plant-monitor"
+#define WiFi_INIT_AP_SSID WIFI_INIT_APNAME " 192.168.0.1:80"
 
 #define PIN_SOILMOIST_A (34)  // ADC1, i/p only - not an issue
 #define PIN_LIGHT_SIG (35)    // ADC1, i/p only - not an issue
@@ -19,6 +26,133 @@
 #define PUMP_MAPPEDMAX (0.8)
 #define PUMP_STARTSPEED (0.4)
 #define PUMP_STARTDELAY (100)
+
+// =============== CONFIG ===================
+
+char WiFi_SSID[WIFI_CRED_MAXLEN] = "";
+char WiFi_Passwd[WIFI_CRED_MAXLEN] = "";
+
+// ========= INIT CONFIG SERVER (ICS) ================
+
+WebServer InitConfigServer(80);
+
+// =============== STATE MACHINE ===================
+
+enum State {
+  STATE_INITCONFIG,
+  STATE_CONNECTING,
+  STATE_CONNECTED
+};
+
+State State_current = STATE_INITCONFIG;
+State State_previous = (State)-1;
+
+unsigned long WiFi_connectStartTime = 0;
+
+void State_EnterInitConfig() {
+  Serial.println("[AP] Starting access point...");
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_AP);
+
+  WiFi.softAPsetHostname(WIFI_INIT_APNAME);
+  IPAddress localIP(192, 168, 0, 1);
+  IPAddress gateway(192, 168, 0, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.softAPConfig(localIP, gateway, subnet);
+  WiFi.softAP(WiFi_INIT_AP_SSID, "");
+  MDNS.begin(WIFI_INIT_APNAME);
+  Serial.printf("[AP] WiFi IP: %s\n", WiFi.softAPIP().toString().c_str());
+
+  void ICS_GetRoot();
+  void ICS_PostConfig();
+
+  InitConfigServer.on("/", ICS_GetRoot);
+  InitConfigServer.on("/connect", HTTP_POST, ICS_PostConfig);
+  InitConfigServer.begin();
+  Serial.println("[AP] InitConfigServer started");
+}
+
+void State_LoopInitConfig() {
+  InitConfigServer.handleClient();
+}
+
+void State_EnterConnecting() {
+  Serial.println("[STA] Tearing down AP...");
+  InitConfigServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WiFi_SSID, WiFi_Passwd);
+  WiFi_connectStartTime = millis();
+  Serial.print("[STA] Connecting to ");
+  Serial.println(WiFi_SSID);
+}
+
+void State_LoopConnecting() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("[STA] Connected! IP: ");
+    Serial.println(WiFi.localIP());
+    State_current = STATE_CONNECTED;
+    return;
+  }
+  if (millis() - WiFi_connectStartTime > WIFI_CONNECT_TIMEOUT) {
+    Serial.println("[STA] Timeout - Switching to AP mode...");
+    State_current = STATE_INITCONFIG;
+  }
+}
+
+// =============== INIT CONFIG SERVER (ICS) FN ===================
+
+const char* ICS_RootPage = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+    <body>
+    <h2>ESP32 Setup</h2>
+    <form action="/connect" method="POST">
+      <label>SSID:</label>
+      <input name="ssid"><br><br>
+
+      <label>Password:</label>
+      <input name="pass" type="password">
+
+      <input type="submit" value="Set Config">
+    </form>
+    </body>
+  </html>
+)rawliteral";
+
+void ICS_GetRoot() {
+  InitConfigServer.send(200, "text/html", ICS_RootPage);
+}
+
+void ICS_PostConfig() {
+  if (!InitConfigServer.hasArg("ssid")) {
+    InitConfigServer.send(400, "text/html", "<h3>Missing field: <b>ssid</b>.</h3>");
+    return;
+  }
+  if (!InitConfigServer.hasArg("pass")) {
+    InitConfigServer.send(400, "text/html", "<h3>Missing field: <b>pass</b>.</h3>");
+    return;
+  }
+
+  String ssid = InitConfigServer.arg("ssid");
+  String pass = InitConfigServer.arg("pass");
+
+  if (ssid.length() > WIFI_CRED_MAXLEN) {
+    InitConfigServer.send(400, "text/html", "<h3>Exceeded max length: <b>ssid[" + String(WIFI_CRED_MAXLEN) + "]</b>: " + String(ssid.length()) + ".</h3>");
+    return;
+  }
+  ssid.toCharArray(WiFi_SSID, WIFI_CRED_MAXLEN);
+
+  if (pass.length() > WIFI_CRED_MAXLEN) {
+    InitConfigServer.send(400, "text/html", "<h3>Exceeded max length: <b>pass[" + String(WIFI_CRED_MAXLEN) + "]</b>: " + String(pass.length()) + ".</h3>");
+    return;
+  }
+  pass.toCharArray(WiFi_Passwd, WIFI_CRED_MAXLEN);
+
+  InitConfigServer.send(200, "text/html", "<h3>Connecting to <b>" + ssid + "</b>...</h3>");
+  State_current = STATE_CONNECTING;
+}
 
 // ================ UTILS ===================
 
@@ -254,7 +388,7 @@ void DeviceReset_SetAndUpload() {
 BLYNK_WRITE(V6) {
   bool val = !!param.asInt();
   if (val) {
-    esp_restart();
+    esp_deep_sleep(1'000'000);
   }
 }
 
@@ -293,23 +427,9 @@ void Timed_30s() {
   SoilMoist_Controller();
 }
 
-// ============ SETUP ============
+// ============ CONNECTED STATE ============
 
-void setup() {
-  // Serial
-  Serial.begin(115200);
-  Serial.println("Serial.begin: done");
-
-  // WiFi
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi Connect: done");
-  Serial.println(WiFi.localIP());
-
+void State_EnterConnected() {
   // Blynk
   Blynk.config(BLYNK_AUTH_TOKEN);
   Serial.print("Connecting to Blynk");
@@ -318,6 +438,40 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nBlynk.connect: done");
+
+  // First state upload - creates the spike on boot or reset
+  DeviceReset_SetAndUpload();
+  Serial.println("DeviceReset_SetAndUpload: done");
+
+  MoistThr_BlynkWrite();
+  Serial.println("MoistThr_BlynkWrite: done");
+
+  Pump_BlynkWrite();
+  Serial.println("Pump_BlynkWrite: done");
+
+  // Schedule all tasks
+  Timed_30s();
+  timer30s.setInterval(30'000, Timed_30s);
+  Serial.println("timer.setInterval: done");
+}
+
+void State_LoopConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[STA] Lost WiFi - Switching to AP mode...");
+    State_current = STATE_INITCONFIG;
+    return;
+  }
+  Blynk.run();
+  timer30s.run();
+  yield();
+}
+
+// ============ SETUP ============
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Serial.begin: done");
+  State_current = STATE_INITCONFIG;
 
   // Sensors
   SoilMoist_Init();
@@ -331,27 +485,24 @@ void setup() {
 
   Pump_Init();
   Serial.println("Pump_Init: done");
-
-  // First state upload - creates the spike on boot or reset
-  DeviceReset_SetAndUpload();
-  Serial.println("DeviceReset_SetAndUpload: done");
-
-  MoistThr_BlynkWrite();
-  Serial.println("MoistThr_BlynkWrite: done");
-
-  Pump_BlynkWrite();
-  Serial.println("Pump_BlynkWrite: done");
-
-  // Schedule all tasks
-  timer30s.setInterval(30'000, Timed_30s);
-  Serial.println("timer.setInterval: done");
 }
 
 // ============ LOOP ============
 
 void loop() {
-  Blynk.run();
-  timer30s.run();
-  // yield to avoid any WDT resets
-  yield();
+  // State setup phase
+  if (State_current != State_previous) {
+    State_previous = State_current;
+    switch (State_current) {
+      case STATE_INITCONFIG: State_EnterInitConfig(); break;
+      case STATE_CONNECTING: State_EnterConnecting(); break;
+      case STATE_CONNECTED: State_EnterConnected(); break;
+    }
+  }
+  // State loop phase
+  switch (State_current) {
+    case STATE_INITCONFIG: State_LoopInitConfig(); break;
+    case STATE_CONNECTING: State_LoopConnecting(); break;
+    case STATE_CONNECTED: State_LoopConnected(); break;
+  }
 }
